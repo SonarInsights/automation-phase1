@@ -7,54 +7,68 @@ from io import BytesIO
 
 st.title("Insight Automation v5 - Streamlit Version")
 
-# --- Load Project List dari Google Drive sebagai CSV ---
+# --- Load satu file Excel dari Google Drive (Project List + Rules) ---
 try:
-    file_id = "1qKZcRumDYft3SJ-Cl3qB65gwCRcB1rUZ"  # ID file dari link kamu
-    sheet_name = "Project%20List"  # Nama sheet di Google Sheets
+    file_id = "1qKZcRumDYft3SJ-Cl3qB65gwCRcB1rUZ"  # ID file Excel kamu
 
-    # URL format CSV
-    download_url = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    # Download file Excel
+    download_url = f"https://drive.google.com/uc?id={file_id}"
+    response = requests.get(download_url)
+    xls = pd.ExcelFile(BytesIO(response.content))
 
-    df_project_list = pd.read_csv(download_url)
+    # Load semua sheet yang dibutuhkan
+    df_project_list = pd.read_excel(xls, sheet_name="Project List")
+    df_column_setup = pd.read_excel(xls, sheet_name="Column Setup")
+    df_rules = pd.read_excel(xls, sheet_name="Rules")
+    df_column_order = pd.read_excel(xls, sheet_name="Column Order Setup")
+    df_method_1_keyword = pd.read_excel(xls, sheet_name="Method 1 Keyword")
+    df_method_selection = pd.read_excel(xls, sheet_name="Method Selection")
 
-    project_options = ["Pilih Project"] + df_project_list["Project Name"].dropna().tolist()
+    # Load Last Updated dari NOTES!B2
+    try:
+        df_notes = pd.read_excel(xls, sheet_name="NOTES", header=None)  # tanpa header
+        last_updated = df_notes.iloc[0, 1]  # baris ke-1, kolom ke-2 = B1
+    except:
+        last_updated = "Unknown"
+
+    # Special Case Setup
+    try:
+        df_special_case = pd.read_excel(xls, sheet_name="Special Case Request")
+    except:
+        df_special_case = pd.DataFrame()
+
     load_success = True
 except Exception as e:
-    st.error(f"❌ Gagal load project list: {e}")
+    st.error(f"❌ Gagal load file dari Google Drive: {e}")
     load_success = False
 
 if load_success:
-    project_name = st.selectbox("Pilih Project Name:", project_options)
+    # Tampilkan informasi Project dan Last Update
+    st.markdown("#### Pilih Project Name:")
+    st.caption(f"📄 Rules terakhir diperbarui pada: {last_updated}")
 
-    uploaded_raw = st.file_uploader("Upload Raw Data (Excel Sheet1)", type=["xlsx"], key="raw")
-    uploaded_rules = st.file_uploader("Upload Rules File (Rules_Insight_Project.xlsx)", type=["xlsx"], key="rules")
+    project_name = st.selectbox("", ["Pilih Project"] + df_project_list["Project Name"].dropna().tolist())
+
+    uploaded_raw = st.file_uploader("Upload Raw Data", type=["xlsx"], key="raw")
 
     submit = st.button("Submit")
 
     if submit:
-        if project_name == "Pilih Project" or uploaded_raw is None or uploaded_rules is None:
-            st.error("❌ Anda harus memilih project dan upload kedua file sebelum submit.")
+        if project_name == "Pilih Project" or uploaded_raw is None:
+            st.error("❌ Anda harus memilih project dan upload raw data sebelum submit.")
         else:
             st.success(f"✅ Project: {project_name} | File Loaded Successfully!")
 
             start_time = time.time()
 
-            # Load files
-            df_raw = pd.read_excel(uploaded_raw, sheet_name="Sheet1")
-            xls = pd.ExcelFile(uploaded_rules)
-            df_column_setup = pd.read_excel(xls, sheet_name="Column Setup")
-            df_rules = pd.read_excel(xls, sheet_name="Rules")
-            df_column_order = pd.read_excel(xls, sheet_name="Column Order Setup")
-            df_issue_categories = pd.read_excel(xls, sheet_name="Issue Categories")
-            df_method = pd.read_excel(xls, sheet_name="Method")
-
-            # Special Case Setup
-            try:
-                df_special_case = pd.read_excel(xls, sheet_name="Special Case Request")
-            except:
-                df_special_case = pd.DataFrame()
-
-            # Proses Data
+            # Load Raw Data
+            #df_raw = pd.read_excel(uploaded_raw, sheet_name="Sheet1")
+            df_raw = pd.read_excel(uploaded_raw, sheet_name=0) #baca sheet pertama
+            
+            # Cek dan ganti kolom 'Campaign' menjadi 'Campaigns'
+            if "Campaign" in df_raw.columns:
+                df_raw = df_raw.rename(columns={"Campaign": "Campaigns"})
+            
             df_processed = df_raw.copy()
 
             # Standardize Verified Account
@@ -76,11 +90,12 @@ if load_success:
                     else:
                         df_processed[col] = default
 
-            # Init default columns
-            for col in ["Official Account", "Noise Tag"]:
+            # Init default columns Official Account and Noise Tag if not adding by rules
+            '''for col in ["Official Account", "Noise Tag"]:
                 if col not in df_processed.columns:
-                    df_processed[col] = ""
+                    df_processed[col] = ""'''
 
+            #Hilangkan jika ada .0 di data Noise Tag dan Official Account
             df_processed["Noise Tag"] = df_processed["Noise Tag"].replace({".0": ""}, regex=True)
             df_processed["Official Account"] = df_processed["Official Account"].replace({".0": ""}, regex=True)
 
