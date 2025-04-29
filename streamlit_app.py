@@ -272,9 +272,16 @@ if load_success:
 
 
             # Setup Columns
-            column_setup = df_column_setup[df_column_setup["Project"] == project_name]
-            for _, row in column_setup.iterrows():
-                col, ref_col, pos, default = row["Target Column"], row["Reference Column"], row["Position"], row["Default Value"]
+            column_setup_default = df_column_setup[df_column_setup["Project"] == "Default"]
+            column_setup_project = df_column_setup[df_column_setup["Project"] == project_name]
+            column_setup_combined = pd.concat([column_setup_default, column_setup_project], ignore_index=True)
+
+            for _, row in column_setup_combined.iterrows():
+                col = row["Target Column"]
+                ref_col = row["Reference Column"]
+                pos = row["Position"]
+                default = row["Default Value"] if pd.notna(row["Default Value"]) else ""  # <-- kalau NaN jadi ""
+
                 if col not in df_processed.columns:
                     if ref_col in df_processed.columns:
                         ref_idx = df_processed.columns.get_loc(ref_col)
@@ -282,6 +289,7 @@ if load_success:
                         df_processed.insert(loc=insert_at, column=col, value=default)
                     else:
                         df_processed[col] = default
+
 
             # Bersihkan .0 di kolom tertentu
             for col in ["Noise Tag", "Official Account"]:
@@ -294,12 +302,17 @@ if load_success:
             rules_combined = pd.concat([rules_default, rules_project], ignore_index=True)
 
             # Apply untuk Noise Tag
-            df_processed = apply_rules(
+            df_processed, summary_df = apply_rules(
                 df=df_processed,
                 rules=rules_combined,
                 output_column="Noise Tag",
                 source_output_column="Output Noise Tag"
             )
+
+            # === Hitung kolom Followers ===
+            if "Original Reach" in df_processed.columns and "Potential Reach" in df_processed.columns:
+                df_processed["Followers"] = df_processed["Original Reach"].fillna(0) + df_processed["Potential Reach"].fillna(0)
+
 
             # Setup Column Order
             if project_name in df_column_order["Project"].values:
