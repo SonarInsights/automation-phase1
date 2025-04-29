@@ -189,7 +189,7 @@ def apply_official_account_logic(df, setup_df, project_name):
 
 
 # === MULAI STREAMLIT APP ===
-st.title("Insight Automation v5 - Streamlit Version")
+st.title("Insight Automation Phase 1 - Noise Detection")
 
 # --- Load satu file Excel dari Google Drive (Project List + Rules) ---
 try:
@@ -293,7 +293,7 @@ if load_success:
 
             # Bersihkan .0 di kolom tertentu
             for col in ["Noise Tag", "Official Account"]:
-                if col in df_processed.columns:
+                if col in df_processed.columns and not df_processed[col].empty:
                     df_processed[col] = df_processed[col].replace({".0": ""}, regex=True)
 
             # === Apply Rules ===
