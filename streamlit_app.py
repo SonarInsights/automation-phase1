@@ -5,6 +5,190 @@ from datetime import datetime
 import requests
 from io import BytesIO
 
+# === FUNGSI: Apply Rules ===
+def apply_rules(df, rules, output_column, source_output_column):
+    import re
+    rules.columns = rules.columns.str.strip()
+    rules_sorted = rules.sort_values(by="Priority", ascending=False)
+
+    if output_column not in df.columns:
+        df[output_column] = ""
+
+    # === Inisialisasi tracker
+    summary_logs = []
+    overwrite_tracker = [[] for _ in range(len(df))]  # 🧠 buat mencatat perubahan per row
+
+    for _, rule in rules_sorted.iterrows():
+        col = rule["Matching Column"]
+        val = rule["Matching Value"]
+        match_type = rule["Matching Type"]
+        out_val = rule[source_output_column]
+        priority = rule["Priority"]
+        channel = rule.get("Channel", "")
+
+        # === Filter berdasarkan Channel
+        if pd.notna(channel) and "Channel" in df.columns:
+            channel_mask = df["Channel"].astype(str).str.lower() == str(channel).strip().lower()
+        else:
+            channel_mask = pd.Series([True] * len(df), index=df.index)
+
+        # === Gabungan kolom (+)
+        if "+" in col:
+            parts = [p.strip() for p in col.split("+")]
+            if not all(p in df.columns for p in parts):
+                continue
+            series = df[parts[0]].astype(str)
+            for p in parts[1:]:
+                series += "+" + df[p].astype(str)
+        else:
+            if col not in df.columns:
+                continue
+            series = df[col].astype(str)
+
+        # === Matching logic
+        if match_type == "contains":
+            if "+" in val:
+                val_parts = val.split("+")
+                submasks = []
+                for v in val_parts:
+                    v = v.strip()
+                    if "|" in v:
+                        keywords = [re.escape(x.strip()) for x in v.split("|")]
+                        if all(k.startswith("\\!") for k in keywords):
+                            keywords_clean = [k[2:] for k in keywords]
+                            submask = ~series.str.contains("|".join(keywords_clean), case=False, na=False)
+                        elif all(not k.startswith("\\!") for k in keywords):
+                            submask = series.str.contains("|".join(keywords), case=False, na=False)
+                        else:
+                            must_not = [k[2:] for k in keywords if k.startswith("\\!")]
+                            must_yes = [k for k in keywords if not k.startswith("\\!")]
+                            mask_not = ~series.str.contains("|".join(must_not), case=False, na=False) if must_not else True
+                            mask_yes = series.str.contains("|".join(must_yes), case=False, na=False) if must_yes else True
+                            submask = mask_not & mask_yes
+                    elif v.startswith("!"):
+                        submask = ~series.str.contains(re.escape(v[1:]), case=False, na=False)
+                    else:
+                        submask = series.str.contains(re.escape(v), case=False, na=False)
+                    submasks.append(submask)
+                mask = pd.concat(submasks, axis=1).all(axis=1)
+            else:
+                if val.startswith("!"):
+                    mask = ~series.str.contains(re.escape(val[1:]), case=False, na=False)
+                else:
+                    mask = series.str.contains(re.escape(val), case=False, na=False)
+
+        elif match_type == "equals":
+            mask = series == val
+
+        elif match_type == "greater_than":
+            try:
+                val_num = float(val)
+                series_num = pd.to_numeric(series, errors="coerce")
+                mask = series_num > val_num
+            except ValueError:
+                continue
+
+        elif match_type == "less_than":
+            try:
+                val_num = float(val)
+                series_num = pd.to_numeric(series, errors="coerce")
+                mask = series_num < val_num
+            except ValueError:
+                continue
+
+        elif match_type == "count_contains":
+            try:
+                keyword, constraint = val.split(":")
+                keyword = re.escape(keyword.strip())
+                constraint = constraint.strip()
+                counts = series.str.lower().str.count(rf"\b{keyword}\b")
+                if "max=" in constraint:
+                    max_allowed = int(constraint.replace("max=", "").strip())
+                    mask = counts <= max_allowed
+                elif "min=" in constraint:
+                    min_allowed = int(constraint.replace("min=", "").strip())
+                    mask = counts >= min_allowed
+                else:
+                    continue
+            except Exception as e:
+                print(f"⚠️ Error parsing count_contains rule: {val} - {e}")
+                continue
+
+        else:
+            continue
+
+        # === Terapkan hasil rule
+        update_mask = mask & channel_mask
+        affected_rows = update_mask.sum()
+
+        if affected_rows > 0:
+            summary_logs.append({
+                "Priority": priority,
+                "Matching Column": col,
+                "Matching Type": match_type,
+                "Matching Value": val,
+                "Output": out_val,
+                "Channel": channel,
+                "Affected Rows": affected_rows
+            })
+
+            # 🚀 Update tracker untuk overwrite
+            for idx in update_mask[update_mask].index:
+                overwrite_tracker[idx].append(f"P{priority}: {out_val}")
+
+        df.loc[update_mask, output_column] = out_val
+
+    summary_df = pd.DataFrame(summary_logs)
+
+    # === Tambahkan kolom hasil chain overwrite di df
+    df[output_column + " - Chain Overwrite"] = [" ➔ ".join(x) if x else "" for x in overwrite_tracker]
+
+    return df, summary_df
+
+
+#Untuk menentukan official account
+def apply_official_account_logic(df, setup_df, project_name):
+    import re
+    setup_df.columns = setup_df.columns.str.strip()
+    
+    # Ambil rules yang sesuai project
+    setup_project = setup_df[setup_df["Project"] == project_name]
+
+    for _, row in setup_project.iterrows():
+        verified = str(row.get("Verified Account", "")).strip().lower()
+        channel = str(row.get("Channel", "")).strip().lower()
+        col = row["Matching Column"]
+        val = row["Matching Value"]
+        match_type = row["Matching Type"]
+
+        if col not in df.columns or "Channel" not in df.columns or "Verified Account" not in df.columns:
+            continue
+
+        mask = (
+            df["Verified Account"].astype(str).str.lower() == verified
+        ) & (
+            df["Channel"].astype(str).str.lower() == channel
+        )
+
+        series = df[col].astype(str)
+
+        if match_type == "contains":
+            pattern = re.escape(val)
+            mask &= series.str.contains(pattern, case=False, na=False)
+
+        elif match_type == "equals":
+            mask &= series == val
+
+        else:
+            continue
+
+        df.loc[mask, "Official Account"] = "Official Account"
+        df.loc[mask, "Noise Tag"] = "1"
+
+    return df
+
+
+# === MULAI STREAMLIT APP ===
 st.title("Insight Automation v5 - Streamlit Version")
 
 # --- Load satu file Excel dari Google Drive (Project List + Rules) ---
@@ -26,8 +210,8 @@ try:
 
     # Load Last Updated dari NOTES!B2
     try:
-        df_notes = pd.read_excel(xls, sheet_name="NOTES", header=None)  # tanpa header
-        last_updated = df_notes.iloc[0, 1]  # baris ke-1, kolom ke-2 = B1
+        df_notes = pd.read_excel(xls, sheet_name="NOTES", header=None)
+        last_updated = df_notes.iloc[0, 1]
     except:
         last_updated = "Unknown"
 
@@ -43,13 +227,15 @@ except Exception as e:
     load_success = False
 
 if load_success:
-    # Tampilkan informasi Project dan Last Update
     st.markdown("#### Pilih Project Name:")
     st.caption(f"📄 Rules terakhir diperbarui pada: {last_updated}")
 
     project_name = st.selectbox("", ["Pilih Project"] + df_project_list["Project Name"].dropna().tolist())
 
     uploaded_raw = st.file_uploader("Upload Raw Data", type=["xlsx"], key="raw")
+
+    remove_duplicate_links = st.checkbox("Remove duplicate link")
+    keep_raw_data = st.checkbox("Keep RAW Data (Save original file as separate sheet)")
 
     submit = st.button("Submit")
 
@@ -61,15 +247,17 @@ if load_success:
 
             start_time = time.time()
 
-            # Load Raw Data
-            #df_raw = pd.read_excel(uploaded_raw, sheet_name="Sheet1")
-            df_raw = pd.read_excel(uploaded_raw, sheet_name=0) #baca sheet pertama
-            
-            # Cek dan ganti kolom 'Campaign' menjadi 'Campaigns'
+            df_raw = pd.read_excel(uploaded_raw, sheet_name=0)
             if "Campaign" in df_raw.columns:
                 df_raw = df_raw.rename(columns={"Campaign": "Campaigns"})
-            
             df_processed = df_raw.copy()
+
+            # Remove duplicate link
+            if remove_duplicate_links and "Link URL" in df_processed.columns:
+                before_count = len(df_processed)
+                df_processed = df_processed.drop_duplicates(subset="Link URL").reset_index(drop=True)
+                after_count = len(df_processed)
+                st.info(f"🔁 Removed {before_count - after_count} duplicate rows based on 'Link URL'")
 
             # Standardize Verified Account
             if "Verified Account" in df_processed.columns:
@@ -78,7 +266,12 @@ if load_success:
                 )
                 df_processed["Verified Account"] = df_processed["Verified Account"].apply(lambda x: "Yes" if x == "yes" else "No")
 
-            # Setup Column
+            # Apply Official Account Logic dari setup sheet
+            df_official_account_setup = pd.read_excel(xls, sheet_name="Official Account Setup")
+            df_processed = apply_official_account_logic(df_processed, df_official_account_setup, project_name)
+
+
+            # Setup Columns
             column_setup = df_column_setup[df_column_setup["Project"] == project_name]
             for _, row in column_setup.iterrows():
                 col, ref_col, pos, default = row["Target Column"], row["Reference Column"], row["Position"], row["Default Value"]
@@ -90,50 +283,30 @@ if load_success:
                     else:
                         df_processed[col] = default
 
-            # Init default columns Official Account and Noise Tag if not adding by rules
-            '''for col in ["Official Account", "Noise Tag"]:
-                if col not in df_processed.columns:
-                    df_processed[col] = ""'''
+            # Bersihkan .0 di kolom tertentu
+            for col in ["Noise Tag", "Official Account"]:
+                if col in df_processed.columns:
+                    df_processed[col] = df_processed[col].replace({".0": ""}, regex=True)
 
-            #Hilangkan jika ada .0 di data Noise Tag dan Official Account
-            df_processed["Noise Tag"] = df_processed["Noise Tag"].replace({".0": ""}, regex=True)
-            df_processed["Official Account"] = df_processed["Official Account"].replace({".0": ""}, regex=True)
+            # === Apply Rules ===
+            rules_default = df_rules[df_rules["Project"] == "Default"]
+            rules_project = df_rules[df_rules["Project"] == project_name] if project_name in df_rules["Project"].values else pd.DataFrame()
+            rules_combined = pd.concat([rules_default, rules_project], ignore_index=True)
 
-            # Apply Rules
-            rules_sorted = df_rules[df_rules["Project"] == project_name].sort_values(by="Priority", ascending=False)
-            priority_tracker = {col: pd.Series([float("inf")] * len(df_processed), index=df_processed.index) for col in ["Noise Tag", "Official Account"]}
+            # Apply untuk Noise Tag
+            df_processed = apply_rules(
+                df=df_processed,
+                rules=rules_combined,
+                output_column="Noise Tag",
+                source_output_column="Output Noise Tag"
+            )
 
-            for _, rule in rules_sorted.iterrows():
-                col = rule["Matching Column"]
-                val = rule["Matching Value"]
-                match_type = rule["Matching Type"]
-                priority_outputs = {}
+            # Setup Column Order
+            if project_name in df_column_order["Project"].values:
+                ordered_cols = df_column_order[df_column_order["Project"] == project_name]
+            else:
+                ordered_cols = df_column_order[df_column_order["Project"] == "Default"]
 
-                if str(rule.get("Affects Noise Tag", "")).strip().lower() == "yes":
-                    priority_outputs["Noise Tag"] = rule["Output Noise Tag"]
-                if str(rule.get("Affects Official Account", "")).strip().lower() == "yes":
-                    priority_outputs["Official Account"] = rule["Output Official Account"]
-
-                if col not in df_processed.columns:
-                    continue
-
-                series = df_processed[col].astype(str)
-                if match_type == "contains":
-                    mask = series.str.contains(val, case=False, na=False)
-                elif match_type == "equals":
-                    mask = series == val
-                else:
-                    continue
-
-                for out_col, out_val in priority_outputs.items():
-                    if out_col not in df_processed.columns:
-                        df_processed[out_col] = ""
-                    update_mask = mask & (priority_tracker[out_col] > rule["Priority"])
-                    df_processed.loc[update_mask, out_col] = out_val
-                    priority_tracker[out_col].loc[update_mask] = rule["Priority"]
-
-            # Column Order
-            ordered_cols = df_column_order[df_column_order["Project"] == project_name]
             ordered_cols = ordered_cols[ordered_cols["Hide"].str.lower() != "yes"]["Column Name"].tolist()
             final_cols = [col for col in ordered_cols if col in df_processed.columns]
 
@@ -142,17 +315,51 @@ if load_success:
             # Save Output
             tanggal_hari_ini = datetime.now().strftime("%Y-%m-%d")
             output_filename = f"{project_name}_{tanggal_hari_ini}.xlsx"
-            df_final.to_excel(output_filename, index=False)
+
+            #Jika keep raw data dan tidak keep raw data
+            with pd.ExcelWriter(output_filename, engine='openpyxl') as writer:
+                if keep_raw_data:
+                    df_raw.to_excel(writer, sheet_name="RAW Data", index=False)
+                df_final.to_excel(writer, sheet_name="Process Data", index=False)
+
 
             end_time = time.time()
             minutes, seconds = divmod(end_time - start_time, 60)
 
+            # === Hitung durasi proses
+            duration_seconds = end_time - start_time
+            hours, remainder = divmod(duration_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+
+            st.info(f"🕒 Proses ini berjalan selama {int(hours)} jam {int(minutes)} menit {int(seconds)} detik.")
+
+
+            # 1. Tampilkan Summary Execution Report
+            st.subheader("📊 Summary Execution Report")
+            with st.expander("Lihat Summary Execution Report"):
+                if not summary_df.empty:
+                    st.dataframe(summary_df)
+                else:
+                    st.info("ℹ️ Tidak ada rule yang match pada data ini.")
+
+            # 2. Tampilkan Chain Overwrite Tracker
+            st.subheader("🧩 Chain Overwrite Tracker")
+            with st.expander("Lihat Chain Overwrite Tracker"):
+                chain_overwrite_columns = [output_column + " - Chain Overwrite" for output_column in ["Noise Tag"]]
+                if any(col in df_final.columns for col in chain_overwrite_columns):
+                    chain_overwrite_df = df_final[chain_overwrite_columns]
+                    st.dataframe(chain_overwrite_df)
+                else:
+                    st.info("ℹ️ Tidak ada perubahan tercatat (Chain Overwrite kosong).")
+
+            # 3. Tombol Download Hasil di paling bawah
             st.success(f"⏱️ Proses selesai dalam {int(minutes)} menit {int(seconds)} detik")
             st.download_button(
-                label="Download Hasil",
+                label="⬇️ Download Hasil Excel",
                 data=open(output_filename, "rb").read(),
                 file_name=output_filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
 else:
     st.stop()
