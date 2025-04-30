@@ -133,16 +133,24 @@ def apply_rules(df, rules, output_column, source_output_column):
                 for idx in update_condition[update_condition].index:
                     overwrite_tracker[idx].append(f"{colname} P{priority}: {out_val}")
 
-        # Log
-        if update_mask.sum() > 0:
-            summary_logs.append({
-                "Priority": priority,
-                "Matching Column": col,
-                "Matching Value": val,
-                "Matching Type": match_type,
-                "Channel": channel,
-                "Affected Rows": update_mask.sum()
-            })
+        # Log per Output Column
+        for output_col in output_cols_in_rules:
+            out_val = rule.get(output_col)
+            colname = output_col.replace("Output ", "")
+            if pd.notna(out_val) and colname in df.columns:
+                affected_count = update_mask.sum()
+                if affected_count > 0 and pd.notna(out_val):
+                    summary_logs.append({
+                        "Priority": priority,
+                        "Matching Column": col,
+                        "Matching Value": val,
+                        "Matching Type": match_type,
+                        "Channel": channel,
+                        "Affected Rows": affected_count,
+                        "Output Column": colname,
+                        "Output Value": out_val
+                    })
+
 
     # Simpan chain overwrite jika hanya untuk Noise Tag
     df[output_column + " - Chain Overwrite"] = [" ➔ ".join(x) if x else "" for x in overwrite_tracker]
@@ -320,8 +328,15 @@ if load_success:
             rules_default = df_rules[df_rules["Project"] == "Default"]
             rules_project = df_rules[df_rules["Project"] == project_name] if project_name in df_rules["Project"].values else pd.DataFrame()
             rules_combined = pd.concat([rules_default, rules_project], ignore_index=True)
+            
+            
+            # 🔍 DEBUG: Cek jumlah rules
+            #st.markdown("##### Debug Rule Matching")
+            #st.write("Jumlah rules Default:", len(rules_default))
+            #st.write("Jumlah rules Project:", len(rules_project))
+            #st.write("Total rules digabung:", len(rules_combined))
 
-            # Apply untuk Noise Tag
+       
             # Apply untuk Noise Tag
             df_processed, summary_df = apply_rules(
                 df=df_processed,
@@ -391,7 +406,29 @@ if load_success:
             st.subheader("📊 Summary Execution Report")
             with st.expander("Lihat Summary Execution Report"):
                 if not summary_df.empty:
-                     st.dataframe(summary_combined)
+                    # Hilangkan .0 di Output Value
+                    summary_cleaned = summary_combined.copy()
+                    summary_cleaned["Output Value"] = summary_cleaned["Output Value"].astype(str).str.replace(r"\.0$", "", regex=True)
+
+                    st.dataframe(summary_cleaned[[
+                        "Priority", "Matching Column", "Matching Value", "Matching Type",
+                        "Channel", "Affected Rows", "Output Column", "Output Value"
+                    ]])
+
+                    # 🔹 Tambahan Ringkasan Noise Tag
+                    if "Noise Tag" in df_processed.columns:
+                        st.markdown("**🧮 Ringkasan Noise Tag:**")
+                        noise_summary = df_processed["Noise Tag"].astype(str).str.replace(r"\.0$", "", regex=True).value_counts().reset_index()
+                        noise_summary.columns = ["Noise Tag", "Jumlah"]
+
+                        description_map = {
+                            "0": "Valid Content",
+                            "1": "Official Brand",
+                            "2": "Exclude Content (noise)",
+                            "3": "Need QC"
+                        }
+                        noise_summary["Description"] = noise_summary["Noise Tag"].astype(str).map(description_map)
+                        st.dataframe(noise_summary)
                 else:
                     st.info("ℹ️ Tidak ada rule yang match pada data ini.")
 
