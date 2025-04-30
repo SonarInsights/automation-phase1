@@ -293,8 +293,12 @@ if load_success:
 
             # Bersihkan .0 di kolom tertentu
             for col in ["Noise Tag", "Official Account"]:
-                if col in df_processed.columns and not df_processed[col].empty:
-                    df_processed[col] = df_processed[col].replace({".0": ""}, regex=True)
+                if col in df_processed.columns:
+                    # Ubah ke string dulu untuk menghindari error numerik
+                    series_str = df_processed[col].astype(str)
+                    # Jalankan replace hanya jika ada ".0" di akhir nilai
+                    if series_str.str.contains(r"\.0$", na=False).any():
+                        df_processed[col] = series_str.replace({r"\.0$": ""}, regex=True)
 
             # === Apply Rules ===
             rules_default = df_rules[df_rules["Project"] == "Default"]
