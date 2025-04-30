@@ -410,7 +410,8 @@ if load_success:
                     summary_cleaned = summary_combined.copy()
                     summary_cleaned["Output Value"] = summary_cleaned["Output Value"].astype(str).str.replace(r"\.0$", "", regex=True)
 
-                    st.dataframe(summary_cleaned[[
+                    summary_sorted = summary_cleaned.sort_values(by="Priority", ascending=False)
+                    st.dataframe(summary_sorted[[
                         "Priority", "Matching Column", "Matching Value", "Matching Type",
                         "Channel", "Affected Rows", "Output Column", "Output Value"
                     ]])
