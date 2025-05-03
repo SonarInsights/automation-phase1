@@ -4,6 +4,122 @@ import time
 from datetime import datetime
 import requests
 from io import BytesIO
+import joblib
+import re
+
+# Load the model and vectorizer for gender prediction
+class GenderPredictor:
+    def __init__(self):
+        model_path = 'path_files/file1.pkl'
+        vectorizer_path = 'path_files/file2.pkl'
+        self.model = joblib.load(model_path)
+        self.vectorizer = joblib.load(vectorizer_path)
+        self.labels = {1: "male", 0: "female"}
+
+    def predict(self, name: str):
+        vector = self.vectorizer.transform([name])
+        result = self.model.predict(vector)[0]
+        proba = self.model.predict_proba(vector).max()
+        return self.labels[result], round(proba * 100, 2)
+
+# Function to process and fill gender prediction if confidence > 70%
+def fill_gender(df):
+    predictor = GenderPredictor()
+    for index, row in df[df['Gender'].isna()].iterrows():
+        name = row['Author']  # Assuming there's an 'Author' column
+        
+        # Skip rows where the 'Author' name is NaN
+        if pd.isna(name):
+            continue
+
+        # Remove non-alphabetic characters (keep only letters)
+        name_cleaned = re.sub(r'[^a-zA-Z]', '', name)
+
+        # Skip empty names after cleaning
+        if not name_cleaned:
+            continue
+        
+        # Predict gender
+        gender, probability = predictor.predict(name_cleaned)
+        
+        # Fill the 'Gender' column if the prediction confidence is greater than 70%
+        if probability > 70:
+            df.at[index, 'Gender'] = gender
+    return df
+
+
+# === Apply Media Tier Logic ===
+def apply_media_tier_logic(df):
+    try:
+        file_id = "1LIcEKO-fdXfo1v-IUeU64He5mh6ti1nc"  # ID file Excel update Media Tier
+
+        # Download file Excel
+        download_url_media_tier = f"https://drive.google.com/uc?id={file_id}"
+        response_media_tier = requests.get(download_url_media_tier)
+        xls_media_tier = pd.ExcelFile(BytesIO(response_media_tier.content))
+
+        # Load the relevant sheets
+        sheet_client = pd.read_excel(xls_media_tier, sheet_name="Le Minerale - from Client")
+        sheet_online = pd.read_excel(xls_media_tier, sheet_name="Online with AVE - Updated")
+        
+        load_success = True
+    except Exception as e:
+        st.error(f"❌ Gagal load file Media Tier dari Google Drive: {e}")
+        load_success = False
+
+    if load_success:
+
+        # Mapping 'Media Name' to 'Media Tier' for both sheets
+        media_tier_dict = {}
+        
+        # Get media tier from the "Le Minerale - from Client"
+        for index, row in sheet_client.iterrows():
+            media_name = row['Media Name']
+            media_tier = row['Media Tier']
+            media_tier_dict[media_name] = media_tier
+
+        # Get media tier from the "Online with AVE - Updated"
+        for index, row in sheet_online.iterrows():
+            media_name = row['Media Name']
+            media_tier = row['Media Tier']
+            if media_name not in media_tier_dict:
+                media_tier_dict[media_name] = media_tier
+
+        # Apply media tier to the raw data
+        for index, row in df[df['Media Name'].notna()].iterrows():
+            media_name = row['Media Name']
+            
+            # Check if Media Name is in our media_tier_dict, otherwise apply Ad Value logic
+            if media_name in media_tier_dict:
+                df.at[index, 'Media Tier'] = media_tier_dict[media_name]
+            else:
+                ad_value = row['Ad Value']
+                if ad_value >= 18000000:
+                    df.at[index, 'Media Tier'] = 1
+                elif ad_value >= 12600000:
+                    df.at[index, 'Media Tier'] = 2
+                else:
+                    df.at[index, 'Media Tier'] = 3
+        return df
+    
+    else:
+        st.stop()
+
+
+# Function to update the "Media Tier" visibility in the Column Order Setup sheet
+def update_media_tier_visibility(df_column_order):
+
+    # Find the row where 'Column Name' is "Media Tier"
+    media_tier_row = df_column_order[df_column_order["Column Name"] == "Media Tier"]
+
+    # Check if "Hide" is "Yes" and change it to "No"
+    if not media_tier_row.empty:
+        if media_tier_row["Hide"].iloc[0].strip().lower() == "yes":
+            df_column_order.loc[df_column_order["Column Name"] == "Media Tier", "Hide"] = "No"
+    
+    # Return the updated DataFrame
+    return df_column_order
+
 
 # === FUNGSI: Apply Rules ===
 def apply_rules(df, rules, output_column, source_output_column):
@@ -235,12 +351,6 @@ try:
     except:
         last_updated = "Unknown"
 
-    # Special Case Setup
-    try:
-        df_special_case = pd.read_excel(xls, sheet_name="Special Case Request")
-    except:
-        df_special_case = pd.DataFrame()
-
     load_success = True
 except Exception as e:
     st.error(f"❌ Gagal load file dari Google Drive: {e}")
@@ -256,6 +366,12 @@ if load_success:
 
     remove_duplicate_links = st.checkbox("Remove duplicate link")
     keep_raw_data = st.checkbox("Keep RAW Data (Save original file as separate sheet)")
+
+    # New checkboxes for Media Tier and KOL Tier
+    apply_media_tier = st.checkbox("Apply Media Tier")
+
+    # New checkboxes for Media Tier and KOL Tier
+    apply_kol_type = st.checkbox("Apply KOL Type")
 
     submit = st.button("Submit")
 
@@ -345,6 +461,9 @@ if load_success:
                 source_output_column="Output Noise Tag"
             )
 
+            # Apply Gender Prediction
+            df_processed = fill_gender(df_processed)
+
             # Tambahkan ini untuk Issue
             df_processed, summary_df_issue = apply_rules(
                 df=df_processed,
@@ -369,6 +488,16 @@ if load_success:
                 df_processed["Followers"] = df_processed["Original Reach"].fillna(0) + df_processed["Potential Reach"].fillna(0)
 
 
+            # Apply Media Tier if checked
+            if apply_media_tier:
+                # Apply Media Tier logic
+                df_processed = apply_media_tier_logic(df_processed)
+
+                # Update "Media Tier" visibility to be shown
+                df_column_order = update_media_tier_visibility(df_column_order)
+
+
+
             # Setup Column Order
             if project_name in df_column_order["Project"].values:
                 ordered_cols = df_column_order[df_column_order["Project"] == project_name]
@@ -380,6 +509,7 @@ if load_success:
 
             df_final = df_processed[final_cols]
 
+            
             # Save Output
             tanggal_hari_ini = datetime.now().strftime("%Y-%m-%d")
             output_filename = f"{project_name}_{tanggal_hari_ini}.xlsx"
